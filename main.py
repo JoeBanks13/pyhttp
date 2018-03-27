@@ -1,47 +1,32 @@
 #!/bin/env python3
 import argparse
-from enum import Enum
 import platform
 import socket
 import ssl
+import base64
 
 from errors import *
 
 context = ssl.SSLContext(ssl.PROTOCOL_TLS)
 
-
-class Scheme(Enum):
-    HTTP = "http"
-    HTTPS = "https"
-
-"""
-# TODO
-- support gzip
-- probably more
-"""
-
-
+__version__ = "2.0.0"
 REQ = "{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n{headers}\r\n{data}\r\n"
-
+SCHEMES = ['http:', 'https:']
 METHODS = ['GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'CONNECT', 'TRACE']
+HEADERS = {'User-Agent': f'pyhttp/{__version__}', 'Allow': '*/*'}
 
 
-def stripheaders(da: str, header_only: bool =False) -> [tuple, str]:
+def stripheaders(da: str) -> [tuple, str]:
     header = da.split('\r\n\r\n', 1)[0]
     try:
         data = da.split('\r\n\r\n', 1)[1]
     except:
         data = "Unsupported Content-Encoding"
-    if header_only:
-        return header
     return header, data
 
 
 def hdict2str(dic: dict) -> str:
-    ret = ""
-    for key, value in dic.items():
-        ret += key.title() + ": " + value + "\r\n"
-    return ret
+    return ''.join('{}:{}\r\n'.format(k.title(), v) for k, v in dic.items())
 
 
 def str2hdict(st: str) -> dict:
@@ -56,21 +41,14 @@ def str2hdict(st: str) -> dict:
 
 
 def parse_url(url: str) -> tuple:
-    if not url.startswith('http://') and not url.startswith("https://"):
-        raise InvalidProtocol("URLs must begin with http:// or https://")
     scheme, _, host = url.split('/', 2)
-
-    if scheme == "http:":
-        default_proto_port = 80
-    else:
-        default_proto_port = 443
 
     if '/' in host:
         path = '/' + host.split('/', 1)[1]
     else:
         path = '/'
     host = host.split('/')[0]
-    port = int(host.split(':')[1]) if ':' in host else default_proto_port
+    port = int(host.split(':')[1]) if ':' in host else 80 if scheme == 'http:' else 443 if scheme == 'https:' else 0
     host = host.split(':')[0] if ':' in host else host
     return scheme, host, int(port), path
 
@@ -82,6 +60,8 @@ def handle_headers(arg: argparse.Namespace) -> None:
     if arg.headers:
         for i in arg.headers:
             HEADERS[i.split(':')[0]] = i.split(':')[1]
+    if arg.auth:
+        HEADERS['Authorization'] = (arg.auth.split('/')[0].encode() + " ".encode() + base64.encodestring(arg.auth.split('/')[1].encode()).strip()).decode()
 
 
 def read(so: socket.socket) -> str:
@@ -96,12 +76,12 @@ def read(so: socket.socket) -> str:
     return ret
 
 
-def request(host: str, port: int, path: str, headers: dict, method: str, data: str, scheme: Scheme) -> tuple:
+def request(host: str, port: int, path: str, headers: dict, method: str, data: str, scheme: str) -> tuple:
     if data:
         headers['Content-Type'] = 'text/plain'
         headers['Content-Length'] = str(len(data))
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if scheme == Scheme.HTTPS:
+    if scheme == 'https:':
         s = context.wrap_socket(s, server_hostname=host)
 
     s.connect((host, port))
@@ -116,17 +96,13 @@ def main(args):
     while True:
         scheme, host, port, path = parse_url(args.url)
         if not scheme in SCHEMES:
-            raise ValueError(f"Scheme {scheme} is not supported")
+            raise InvalidScheme(f"Scheme {scheme} is not supported")
         if args.method is None:
             args.method = "GET"
         if not args.method.upper() in METHODS:
             print("WARN: unrecognised method: {}, continuing anyways...".format(args.method.upper()))
         handle_headers(args)
-        if scheme == "http:":
-            schme = Scheme.HTTP
-        else:
-            schme = Scheme.HTTPS
-        reqh, reqd = request(host, port, path, HEADERS, args.method.upper(), args.data, schme)
+        reqh, reqd = request(host, port, path, HEADERS, args.method.upper(), args.data, scheme)
         print(reqd)
         headers = str2hdict(reqh)
         if args.verbose:
@@ -149,6 +125,7 @@ if __name__ == "__main__":
     parser.add_argument('-D', '--data', help="Data to send in request", default="")
     parser.add_argument('-H', '--headers', help="Send custom headers", default=[], nargs='*')
     parser.add_argument('-R', '--no-redirect', help="Don't ollow redirects", action="store_true")
+    parser.add_argument('-A', '--auth', help="Authenticate with the server(Type/User:Pass)")
     parser.add_argument('--no-default-headers', help="Only send custom headers", action="store_true")
     args = parser.parse_args()
     main(args)
